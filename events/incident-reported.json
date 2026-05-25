@@ -1,0 +1,20 @@
+{
+  "httpMethod": "GET",
+  "path": "/incidents/test-incident-id",
+  "pathParameters": {
+    "id": "test-incident-id"
+  },
+  "queryStringParameters": null,
+  "body": null,
+  "isBase64Encoded": false,
+  "headers": {
+    "Accept": "application/json",
+    "x-correlation-id": "test-correlation-id-001"
+  },
+  "requestContext": {
+    "httpMethod": "GET",
+    "path": "/incidents/test-incident-id",
+    "resourcePath": "/incidents/{id}",
+    "stage": "local"
+  }
+}

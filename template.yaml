@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  medina-incident-router
+
+  SAM Template for medina-incident-router
+
+Globals:
+  Function:
+    Timeout: 3
+    Runtime: python3.13
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+        SERVICE_NAME: medina-incident-router
+
+Resources:
+  IdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: medina-idempotency
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiration
+        Enabled: true
+      BillingMode: PAY_PER_REQUEST
+
+  IncidentStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: medina-incident-state
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  IncidentProjectionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers/projection.lambda_handler
+      Environment:
+        Variables:
+          INCIDENTS_TABLE_NAME: !Ref IncidentStateTable
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTable
+      Policies:
+        - Statement:
+            - Sid: AllowDynamodbReadWrite
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource: !GetAtt IdempotencyTable.Arn
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IncidentStateTable
+      Events:
+        IncidentReportedToProjectionEvent:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref IncidentEventBus
+            Pattern:
+              detail-type:
+                - IncidentReported
+                - IncidentDispatched
+                - IncidentMonitored
+                - IncidentNoDecision
+                - IncidentAcknowledged
+                - IncidentEscalated
+                
+  IncidentEscalationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers/escalation.lambda_handler
+      Environment:
+        Variables:
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTable
+      Policies:
+        - Statement:
+            - Sid: AllowDynamodbReadWrite
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource: !GetAtt IdempotencyTable.Arn
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref IncidentEventBus
+      Events:
+        IncidentReportedToEscalationEvent:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref IncidentEventBus
+            Pattern:
+              detail-type:
+                - IncidentNoDecision
+                - IncidentTimeout
+
+  IncidentDecisionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers/decision.lambda_handler
+      Environment:
+        Variables:
+          INCIDENT_EVENT_BUS_NAME: !Ref IncidentEventBus
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTable
+      Policies:
+        - Statement:
+            - Sid: AllowDynamodbReadWrite
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource: !GetAtt IdempotencyTable.Arn
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref IncidentEventBus
+      Events:
+        IncidentReportedToDecisionEvent:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref IncidentEventBus
+            Pattern:
+              detail-type:
+                - IncidentReported
+
+  IncidentEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: medina-incident-bus
+
+  IncidentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers/incidents.lambda_handler
+      Environment:
+        Variables:
+          INCIDENTS_TABLE_NAME: !Ref IncidentStateTable
+          INCIDENT_EVENT_BUS_NAME: !Ref IncidentEventBus
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTable
+      Policies:
+        - Statement:
+            - Sid: AllowDynamodbReadWrite
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource: !GetAtt IdempotencyTable.Arn
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IncidentStateTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref IncidentEventBus
+      Events:
+        CreateIncident:
+          Type: Api
+          Properties:
+            Path: /incidents
+            Method: post
+        GetIncident:
+          Type: Api
+          Properties:
+            Path: /incidents/{id}
+            Method: get
+        AcknowledgeIncident:
+          Type: Api
+          Properties:
+            Path: /incidents/{id}/ack
+            Method: post
+
+  IncidentTimeoutMonitorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handlers/timeout_monitor.lambda_handler
+      Environment:
+        Variables:
+          INCIDENTS_TABLE_NAME: !Ref IncidentStateTable
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTable
+          INCIDENT_EVENT_BUS_NAME: !Ref IncidentEventBus
+      Policies:
+        - Statement:
+            - Sid: AllowDynamodbReadWrite
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource: !GetAtt IdempotencyTable.Arn
+        - DynamoDBReadPolicy:
+            TableName: !Ref IncidentStateTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref IncidentEventBus
+      Events:
+        TimeoutSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+
+Outputs:
+  IncidentsApiEndpoint:
+    Description: API Gateway endpoint URL for the incidents API
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/incidents"
+
+  IncidentsFunctionArn:
+    Description: ARN of the incidents Lambda function
+    Value: !GetAtt IncidentsFunction.Arn
+
+  IncidentEventBusName:
+    Description: Name of the EventBridge bus for incident domain events
+    Value: !Ref IncidentEventBus
+
+  IncidentProjectionFunctionArn:
+    Description: ARN of the projection Lambda function
+    Value: !GetAtt IncidentProjectionFunction.Arn
